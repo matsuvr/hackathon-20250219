@@ -41,20 +41,20 @@ except Exception as e:
 
 app = FastAPI()
 
-# 許可するオリジン
-ALLOWED_ORIGINS = [
-    "https://YOUR-PROJECT-ID.web.app",  # Firebase Hostingのドメイン（デプロイ後に実際のドメインに置き換え）
-    "https://YOUR-PROJECT-ID.firebaseapp.com",  # Firebase Hostingの代替ドメイン
-    "http://localhost:8000",  # ローカル開発用
-    "http://localhost:5000"   # Firebase エミュレータ用
-]
+# 許可するオリジンを環境変数から取得できるように変更
+ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "").split(",")
+if not ALLOWED_ORIGINS:
+    ALLOWED_ORIGINS = [
+        "http://localhost:8000",
+        "http://localhost:5000"
+    ]
 
 # CORSミドルウェアの設定
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["POST"],
+    allow_methods=["POST", "GET"],
     allow_headers=["*"],
 )
 
@@ -159,3 +159,9 @@ async def chat(request: ChatRequest):
 async def health_check():
     """ヘルスチェックエンドポイント"""
     return {"status": "healthy"}
+
+# メインの実行部分を追加
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.getenv("PORT", 8080))
+    uvicorn.run(app, host="0.0.0.0", port=port)
