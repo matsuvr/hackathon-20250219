@@ -3,30 +3,36 @@ FROM python:3.11-slim AS builder
 
 WORKDIR /app
 
-# 依存関係のインストール
+# 基本的なビルドツールのインストール
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# requirements.txtをコピー
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt --target=/app/dependencies
+
+# 依存関係のインストール（パスを指定してインストール）
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt --target=/app/packages
 
 # アプリケーションコードのコピー
 COPY . .
 
-# 実行ステージ
-FROM gcr.io.distroless/python3:nonroot
+# 実行ステージ - Distrolessを使用
+FROM gcr.io/distroless/python3-debian12:nonroot
 
-# 必要なPythonパッケージとアプリケーションコードをコピー
 WORKDIR /app
-COPY --from=builder /app/dependencies /app
-COPY --from=builder /app /app
 
-# PYTHONPATHを設定
-ENV PYTHONPATH=/app
+# アプリケーションコードとパッケージをコピー
+COPY --from=builder /app/packages /app/packages
+COPY --from=builder /app/*.py /app/
 
 # 環境変数の設定
 ENV PORT=8080
+ENV PYTHONPATH=/app/packages
+ENV PYTHONUNBUFFERED=1
+
 EXPOSE 8080
 
-# 非root ユーザーとして実行
-USER nonroot
-
-# アプリケーションの実行
-CMD ["python", "-c", "import uvicorn; uvicorn.run('main:app', host='0.0.0.0', port=int('${PORT}'))"]
+# pythonコマンドのフルパスを指定
+CMD ["-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080", "--log-level", "debug"]

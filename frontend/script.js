@@ -2,7 +2,6 @@ document.addEventListener('DOMContentLoaded', () => {
     const messageContainer = document.getElementById('messageContainer');
     const messageBox = document.getElementById('messageBox');
     const sendButton = document.getElementById('sendButton');
-    const goalInput = document.getElementById('goalInput');
     const loadingIndicator = document.getElementById('loadingIndicator');
 
     // 会話の状態を管理
@@ -11,10 +10,37 @@ document.addEventListener('DOMContentLoaded', () => {
         extractedGoal: null
     };
 
+    // WSL2のIPアドレスを取得する関数
+    async function getWslAddress() {
+        try {
+            const response = await fetch('http://localhost:8080/health');
+            if (response.ok) {
+                return 'localhost';
+            }
+        } catch (error) {
+            console.log('Trying WSL IP');
+        }
+
+        try {
+            // WSL2のIPアドレスを試す
+            const response = await fetch('http://172.21.0.2:8080/health');
+            if (response.ok) {
+                return '172.21.0.2';
+            }
+        } catch (error) {
+            console.error('Could not connect to backend:', error);
+        }
+        return 'localhost'; // デフォルトはlocalhostに戻る
+    }
+
     // APIのベースURLを環境に応じて設定
-    const baseUrl = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
-        ? 'http://localhost:8000'
-        : 'https://your-cloud-run-url.a.run.app';
+    let baseUrl = 'http://localhost:8080';
+    
+    // 起動時にWSLのアドレスをチェック
+    getWslAddress().then(address => {
+        baseUrl = `http://${address}:8080`;
+        console.log('Using backend URL:', baseUrl);
+    });
 
     // Marked.jsの設定
     marked.setOptions({
@@ -135,7 +161,6 @@ document.addEventListener('DOMContentLoaded', () => {
     // 送信ボタンのクリックハンドラー
     sendButton.addEventListener('click', async () => {
         const message = messageBox.value.trim();
-        const goal = goalInput.value.trim();
         
         if (!message) return;
         
