@@ -18,36 +18,28 @@ logger = logging.getLogger(__name__)
 
 # 環境変数の読み込み
 def load_environment_variables():
-    """環境変数を読み込む関数"""
-    logger.info("Starting environment variable loading process")
-    
-    # Cloud Run環境の検出
-    is_cloud_run = os.getenv("K_SERVICE") is not None
-    logger.info(f"Running in Cloud Run environment: {is_cloud_run}")
-    
-    required_vars = ["GEMINI_API_KEY"]
+    required_vars = {
+        'GROQ_API_KEY': None,
+        'GOOGLE_CLIENT_ID': None,
+        'GOOGLE_CLIENT_SECRET': None,
+        'FIREBASE_PRIVATE_KEY': None,
+        'FIREBASE_CLIENT_EMAIL': None,
+        'GEMINI_API_KEY': None,
+        'JWT_SECRET_KEY': None,
+        'FRONTEND_URL': 'http://localhost:8000'  # デフォルト値を設定
+    }
+
     env_values = {}
-    
-    # .envファイルの読み込み試行（ローカル環境のみ）
-    if not is_cloud_run and os.path.exists(".env"):
-        logger.info("Found .env file, attempting to load")
-        try:
-            load_dotenv()
-            logger.info("Successfully loaded .env file")
-        except Exception as e:
-            logger.error(f"Error loading .env file: {e}")
-            raise
-    
-    # 環境変数の存在確認と値の取得
-    for var in required_vars:
-        value = os.getenv(var)
-        if value:
-            # 値は表示せずに存在のみログ
-            logger.info(f"Found environment variable: {var}")
-            env_values[var] = value
-        else:
-            logger.error(f"Missing required environment variable: {var}")
-            raise ValueError(f"Required environment variable {var} is not set")
+    for var, default in required_vars.items():
+        value = os.getenv(var, default)
+        if value is None:
+            # 開発環境の場合はエラーを出さずに警告を表示
+            if os.getenv('ENVIRONMENT') != 'production':
+                logger.warning(f"Environment variable {var} is not set")
+                value = 'dummy_value_for_development'
+            else:
+                raise ValueError(f"Required environment variable {var} is not set in production")
+        env_values[var] = value
 
     return env_values
 
@@ -60,21 +52,20 @@ app = FastAPI(
 
 # フロントエンドのオリジンを設定
 ALLOWED_ORIGINS = [
+    # ローカル開発環境用
     "http://localhost:8000",
     "http://127.0.0.1:8000",
-    "http://localhost:5000",
-    "http://127.0.0.1:5000",
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
-    "https://planner0219.web.app/",  # Firebase Hostingのドメイン
+    # Firebase Hosting本番環境用
+    "https://planner0219.web.app",
+    "https://planner0219.firebaseapp.com"
 ]
 
 # CORSミドルウェアの設定
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,  # 許可するオリジンを制限
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE"],  # 必要なHTTPメソッドのみを許可
     allow_headers=["*"],
 )
 
@@ -288,11 +279,9 @@ async def chat(request: ChatRequest):
         )
 
         if not transition.can_proceed and transition.required_info:
+            required_info_list = '\n'.join(f"- {info}" for info in transition.required_info)
             return ChatResponse(
-                response=f"""
-                次のステージに進むには、以下の情報が必要です：
-                {chr(10).join(f"- {info}" for info in transition.required_info)}
-                """.strip(),
+                response=f"次のステージに進むには、以下の情報が必要です：\n{required_info_list}",
                 stage=request.stage,
                 extractedGoal=context.extracted_goal,
                 targetDate=context.target_date
@@ -310,14 +299,15 @@ async def chat(request: ChatRequest):
             )
             result: GoalAnalysis = response.parsed
             
+            suggestions_list = '\n'.join(f"- {s}" for s in result.suggestions)
+            next_steps_list = '\n'.join(f"- {s}" for s in result.next_steps)
             response_text = f"""抽出した目標: {result.extracted_goal}
 
 提案:
-{chr(10).join(f"- {s}" for s in result.suggestions)}
+{suggestions_list}
 
 次のステップ:
-{chr(10).join(f"- {s}" for s in result.next_steps)}
-"""
+{next_steps_list}"""
             next_stage = ConversationStage.GOAL_EXTRACTED
             extracted_goal = result.extracted_goal
 
@@ -337,22 +327,26 @@ async def chat(request: ChatRequest):
             )
             result: PlanningAdvice = response.parsed
             
+            main_steps_list = '\n'.join(f"- {s}" for s in result.main_steps)
+            resources_list = '\n'.join(f"- {s}" for s in result.required_resources)
+            challenges_list = '\n'.join(f"- {s}" for s in result.potential_challenges)
+            strategies_list = '\n'.join(f"- {s}" for s in result.mitigation_strategies)
+            
             response_text = f"""実行プラン:
 
 主要なステップ:
-{chr(10).join(f"- {s}" for s in result.main_steps)}
+{main_steps_list}
 
 必要なリソース:
-{chr(10).join(f"- {s}" for s in result.required_resources)}
+{resources_list}
 
 予想される課題:
-{chr(10).join(f"- {s}" for s in result.potential_challenges)}
+{challenges_list}
 
 対策:
-{chr(10).join(f"- {s}" for s in result.mitigation_strategies)}
+{strategies_list}
 
-このプランについて、ご意見やさらに詳しく知りたい点はありますか？
-"""
+このプランについて、ご意見やさらに詳しく知りたい点はありますか？"""
             next_stage = ConversationStage.PLANNING
 
         elif request.stage == ConversationStage.PLANNING:
@@ -373,17 +367,16 @@ async def chat(request: ChatRequest):
             
             if result.confidence >= 0.6:
                 target_date = (current_date + timedelta(days=30.44 * result.period_months)).strftime('%Y-%m-%d')
-                response_text = f"""
-                目標達成までの期間を{result.period_months}ヶ月と設定しました。
+                milestones_list = '\n'.join(f"- {m}" for m in result.milestones)
+                response_text = f"""目標達成までの期間を{result.period_months}ヶ月と設定しました。
 
-                判断理由:
-                {result.reasoning}
+判断理由:
+{result.reasoning}
 
-                主要なマイルストーン:
-                {chr(10).join(f"- {m}" for m in result.milestones)}
+主要なマイルストーン:
+{milestones_list}
 
-                この期間設定で具体的なスケジュールを作成していきましょう。
-                """
+この期間設定で具体的なスケジュールを作成していきましょう。"""
                 next_stage = ConversationStage.SCHEDULING
             else:
                 response_text = "目標達成までの具体的な期間を教えていただけますか？（例：3ヶ月、半年、1年など）"
@@ -407,25 +400,30 @@ async def chat(request: ChatRequest):
             )
             result: SchedulePlan = response.parsed
             
+            milestones_text = '\n'.join(f"- {m['title']}: {m['deadline']}" for m in result.milestones)
+            monthly_goals_text = '\n'.join(f"- {g['month']}: {g['goals']}" for g in result.monthly_goals)
+            weekly_tasks_text = '\n'.join(f"【{w['week']}】\n" + '\n'.join(f"- {t}" for t in w['tasks']) for w in result.weekly_tasks)
+            time_estimates_text = '\n'.join(f"- {task}: {time}" for task, time in result.time_estimates.items())
+            review_points_text = '\n'.join(f"- {r['timing']}: {r['focus']}" for r in result.review_points)
+
             response_text = f"""スケジュール案を作成しました。
 
 主要なマイルストーン:
-{chr(10).join(f"- {m['title']}: {m['deadline']}" for m in result.milestones)}
+{milestones_text}
 
 月別の目標:
-{chr(10).join(f"- {g['month']}: {g['goals']}" for g in result.monthly_goals)}
+{monthly_goals_text}
 
 週別のタスク:
-{chr(10).join(f"【{w['week']}】\n" + chr(10).join(f"- {t}" for t in w['tasks']) for w in result.weekly_tasks)}
+{weekly_tasks_text}
 
 タスクの所要時間目安:
-{chr(10).join(f"- {task}: {time}" for task, time in result.time_estimates.items())}
+{time_estimates_text}
 
 進捗確認のポイント:
-{chr(10).join(f"- {r['timing']}: {r['focus']}" for r in result.review_points)}
+{review_points_text}
 
-このスケジュールをカレンダーに登録しますか？
-"""
+このスケジュールをカレンダーに登録しますか？"""
             next_stage = ConversationStage.CONFIRM_SCHEDULE
 
         elif request.stage == ConversationStage.CONFIRM_SCHEDULE:
