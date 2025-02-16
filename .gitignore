@@ -1,5 +1,6 @@
 # Environment variables
 .env
+*firebase-admin*.json
 
 # Python
 __pycache__/
