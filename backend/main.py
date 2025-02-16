@@ -9,68 +9,73 @@ from enum import Enum
 from datetime import datetime, timedelta
 import re
 
-# ロギングの設定
-logging.basicConfig(level=logging.INFO)
+# ロギングの設定を詳細化
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
 # 環境変数の読み込み
-# .envファイルが存在しない場合は環境変数から直接読み込む
-if os.path.exists(".env"):
-    logger.info("Loading .env file")
-    try:
-        load_dotenv(encoding='utf-8')  # エンコーディングを明示的に指定
-    except UnicodeDecodeError:
-        # UTF-8で読めない場合はcp932（Shift-JIS）で試行
-        logger.info("Retrying with cp932 encoding")
-        load_dotenv(encoding='cp932')
-    except Exception as e:
-        logger.error(f"Error loading .env file: {e}")
-        raise
-else:
-    logger.info(".env file not found, using environment variables")
+def load_environment_variables():
+    """環境変数を読み込む関数"""
+    logger.info("Starting environment variable loading process")
+    
+    # Cloud Run環境の検出
+    is_cloud_run = os.getenv("K_SERVICE") is not None
+    logger.info(f"Running in Cloud Run environment: {is_cloud_run}")
+    
+    required_vars = ["GEMINI_API_KEY"]
+    env_values = {}
+    
+    # .envファイルの読み込み試行（ローカル環境のみ）
+    if not is_cloud_run and os.path.exists(".env"):
+        logger.info("Found .env file, attempting to load")
+        try:
+            load_dotenv()
+            logger.info("Successfully loaded .env file")
+        except Exception as e:
+            logger.error(f"Error loading .env file: {e}")
+            raise
+    
+    # 環境変数の存在確認と値の取得
+    for var in required_vars:
+        value = os.getenv(var)
+        if value:
+            # 値は表示せずに存在のみログ
+            logger.info(f"Found environment variable: {var}")
+            env_values[var] = value
+        else:
+            logger.error(f"Missing required environment variable: {var}")
+            raise ValueError(f"Required environment variable {var} is not set")
 
-# Gemini APIの設定
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-if not GEMINI_API_KEY:
-    raise ValueError("GEMINI_API_KEY is not set in environment variables or .env file")
+    return env_values
 
-try:
-    # 新しいSDKの使用方法に更新
-    client = genai.Client(api_key=GEMINI_API_KEY)
-except Exception as e:
-    logger.error(f"Failed to configure Gemini API: {e}")
-    raise
+# FastAPIアプリケーションの設定
+app = FastAPI(
+    title="Goal Achievement Assistant API",
+    description="An API for goal setting and achievement planning",
+    version="1.0.0"
+)
 
-app = FastAPI()
-
-# WSL2環境でのアクセスを考慮したCORS設定
+# フロントエンドのオリジンを設定
 ALLOWED_ORIGINS = [
     "http://localhost:8000",
     "http://127.0.0.1:8000",
     "http://localhost:5000",
     "http://127.0.0.1:5000",
-    "http://localhost:3000",  # React開発サーバー用
+    "http://localhost:3000",
     "http://127.0.0.1:3000",
-    # WSL2のIPアドレス範囲からのアクセスを許可
-    "http://172.16.0.0:8000",
-    "http://172.17.0.0:8000",
-    "http://172.18.0.0:8000",
-    "http://172.19.0.0:8000",
-    "http://172.20.0.0:8000",
-    "http://172.21.0.0:8000",
-    "http://172.22.0.0:8000",
-    "http://172.23.0.0:8000",
-    "http://172.24.0.0:8000",
-    "http://172.25.0.0:8000"
+    "https://planner0219.web.app/",  # Firebase Hostingのドメイン
 ]
 
-# より寛容なCORSミドルウェアの設定
+# CORSミドルウェアの設定
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # すべてのオリジンを許可
+    allow_origins=ALLOWED_ORIGINS,  # 許可するオリジンを制限
     allow_credentials=True,
-    allow_methods=["*"],  # すべてのHTTPメソッドを許可
-    allow_headers=["*"],  # すべてのヘッダーを許可
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 class ConversationStage(str, Enum):
@@ -92,178 +97,412 @@ class ChatResponse(BaseModel):
     extractedGoal: str | None = None
     targetDate: str | None = None
 
-class PeriodExtraction(BaseModel):
+class PeriodPrediction(BaseModel):
     months: int
     confidence: float
-    explanation: str
+    source_text: str
+    prediction_reason: str
+
+class ApprovalDecision(BaseModel):
+    is_approved: bool
+    confidence: float
+    reasoning: str
+    extracted_intent: str
+
+class ReminderOverride(BaseModel):
+    method: str  # "popup" or "email"
+    minutes: int
+
+class EventReminders(BaseModel):
+    useDefault: bool = False
+    overrides: list[ReminderOverride]
+
+class EventPriority(str, Enum):
+    LOW = "1"      # ラベンダー
+    MEDIUM = "6"   # みかん
+    HIGH = "11"    # トマト
+
+class CalendarEvent(BaseModel):
+    title: str
+    description: str
+    start_date: str
+    end_date: str
+    priority: EventPriority
+    reminders: EventReminders
+
+class CalendarSchedule(BaseModel):
+    events: list[CalendarEvent]
+    timezone: str = "Asia/Tokyo"
+
+class GoalAnalysis(BaseModel):
+    extracted_goal: str
+    confidence: float
+    suggestions: list[str]
+    next_steps: list[str]
+
+class PlanningAdvice(BaseModel):
+    main_steps: list[str]
+    required_resources: list[str]
+    potential_challenges: list[str]
+    mitigation_strategies: list[str]
+
+class PeriodAnalysis(BaseModel):
+    period_months: int
+    confidence: float
+    reasoning: str
+    milestones: list[str]
+
+class SchedulePlan(BaseModel):
+    milestones: list[dict[str, str]]  # { "title": str, "deadline": str }
+    monthly_goals: list[dict[str, str]]  # { "month": str, "goals": str }
+    weekly_tasks: list[dict[str, list[str]]]  # { "week": str, "tasks": list[str] }
+    time_estimates: dict[str, str]  # task_name: estimated_time
+    review_points: list[dict[str, str]]  # { "timing": str, "focus": str }
+
+class StageTransitionResult(BaseModel):
+    can_proceed: bool
+    confidence: float
+    required_info: list[str] | None = None
+    next_stage: ConversationStage
+    reason: str
+
+class ConversationContext(BaseModel):
+    current_stage: ConversationStage
+    extracted_goal: str | None
+    target_date: str | None
+    schedule_data: SchedulePlan | None = None
+    calendar_data: CalendarSchedule | None = None
 
 async def extract_period_with_gemini(message: str, client: genai.Client) -> int | None:
-    prompt = f"""
-    ユーザーの入力から目標達成の期間を抽出してください。
-    入力: {message}
-
-    以下の形式のJSONで返答してください：
-    - months: 月数（年の場合は12を掛けて月数に変換）
-    - confidence: 抽出の確信度（0.0から1.0）
-    - explanation: 抽出理由の説明
-
-    例:
-    "1年後までに" → {{"months": 12, "confidence": 0.9, "explanation": "明確に1年と指定されている"}}
-    "来年の夏まで" → {{"months": 12, "confidence": 0.7, "explanation": "おおよそ1年として解釈"}}
-    """
-
     try:
         response = client.models.generate_content(
             model='gemini-2.0-flash',
-            contents=prompt,
+            contents=f"ユーザーの入力から目標達成の期間を抽出してください。入力: {message}",
             config={
                 'response_mime_type': 'application/json',
-                'response_schema': PeriodExtraction,
+                'response_schema': PeriodPrediction,
             }
         )
         
-        result: PeriodExtraction = response.parsed
-        if result.confidence >= 0.6:  # 確信度が60%以上の場合のみ採用
+        result: PeriodPrediction = response.parsed
+        if result and result.confidence >= 0.6:
             return result.months
         return None
     except Exception as e:
         logger.error(f"Error extracting period with Gemini: {e}")
         return None
 
+async def analyze_user_approval(message: str, client: genai.Client) -> bool:
+    try:
+        response = client.models.generate_content(
+            model='gemini-2.0-flash',
+            contents=f"ユーザーの回答からスケジュールの承認状態を判断してください。入力: {message}",
+            config={
+                'response_mime_type': 'application/json',
+                'response_schema': ApprovalDecision,
+            }
+        )
+        
+        result: ApprovalDecision = response.parsed
+        return result.is_approved if result and result.confidence >= 0.6 else False
+    except Exception as e:
+        logger.error(f"Error analyzing user approval: {e}")
+        return False
+
+async def generate_calendar_events(goal: str, target_date: str, client: genai.Client) -> CalendarSchedule:
+    current_date = datetime.now()
+    try:
+        response = client.models.generate_content(
+            model='gemini-2.0-flash',
+            contents=f"""
+                目標「{goal}」のためのカレンダーイベントを生成します。
+                開始日: {current_date.strftime('%Y-%m-%d')}
+                終了日: {target_date}
+
+                目標を達成するために必要なマイルストーンとタスクを作成してください。
+                イベントの重要度は以下から選択してください：
+                - LOW (1, ラベンダー): 通常のタスク
+                - MEDIUM (6, みかん): 重要なマイルストーン
+                - HIGH (11, トマト): 重要な締め切りや目標達成に不可欠なタスク
+            """,
+            config={
+                'response_mime_type': 'application/json',
+                'response_schema': CalendarSchedule,
+            }
+        )
+        
+        return response.parsed
+    except Exception as e:
+        logger.error(f"Error generating calendar events: {e}")
+        raise
+
+async def validate_stage_transition(
+    current_stage: ConversationStage,
+    message: str,
+    context: ConversationContext,
+    client: genai.Client
+) -> StageTransitionResult:
+    try:
+        response = client.models.generate_content(
+            model='gemini-2.0-flash',
+            contents=f"""
+            現在のステージ: {current_stage}
+            目標: {context.extracted_goal or "未設定"}
+            期間: {context.target_date or "未設定"}
+            ユーザーの入力: {message}
+
+            現在のステージから次のステージに進めるか判断してください。
+            必要な情報が不足している場合は、required_infoに必要な情報を列挙してください。
+            """,
+            config={
+                'response_mime_type': 'application/json',
+                'response_schema': StageTransitionResult,
+            }
+        )
+        return response.parsed
+    except Exception as e:
+        logger.error(f"Error validating stage transition: {e}")
+        return StageTransitionResult(
+            can_proceed=False,
+            confidence=0.0,
+            next_stage=current_stage,
+            reason=f"エラーが発生しました: {str(e)}"
+        )
+
 @app.post("/api/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
     try:
-        stage = request.stage
-        next_stage = stage
-        extracted_goal = request.extractedGoal
-        target_date = request.targetDate
-        current_date = datetime.now()
+        # 会話コンテキストの作成
+        context = ConversationContext(
+            current_stage=request.stage,
+            extracted_goal=request.extractedGoal,
+            target_date=request.targetDate
+        )
 
-        # ステージに応じたプロンプトの作成
-        if stage == ConversationStage.INITIAL:
-            prompt = f"""
-            ユーザーの入力から具体的な目標を抽出してください。
-            以下の点に注意してください：
-            - 目標が曖昧な場合は、より具体的な目標を提案してください
-            - 目標は測定可能で達成可能なものにしてください
-            - 抽出した目標を最初に明確に示し、その後でアドバイスを提供してください
+        # ステージ遷移の検証
+        transition = await validate_stage_transition(
+            request.stage,
+            request.message,
+            context,
+            client
+        )
 
-            ユーザーの入力: {request.message}
-            """
+        if not transition.can_proceed and transition.required_info:
+            return ChatResponse(
+                response=f"""
+                次のステージに進むには、以下の情報が必要です：
+                {chr(10).join(f"- {info}" for info in transition.required_info)}
+                """.strip(),
+                stage=request.stage,
+                extractedGoal=context.extracted_goal,
+                targetDate=context.target_date
+            )
+
+        # 既存の各ステージの処理を続ける...
+        if request.stage == ConversationStage.INITIAL:
             response = client.models.generate_content(
                 model='gemini-2.0-flash',
-                contents=prompt
+                contents=f"ユーザーの入力から具体的な目標を抽出し、分析してください。入力: {request.message}",
+                config={
+                    'response_mime_type': 'application/json',
+                    'response_schema': GoalAnalysis,
+                }
             )
+            result: GoalAnalysis = response.parsed
+            
+            response_text = f"""抽出した目標: {result.extracted_goal}
+
+提案:
+{chr(10).join(f"- {s}" for s in result.suggestions)}
+
+次のステップ:
+{chr(10).join(f"- {s}" for s in result.next_steps)}
+"""
             next_stage = ConversationStage.GOAL_EXTRACTED
-            extracted_goal = response.text
+            extracted_goal = result.extracted_goal
 
-        elif stage == ConversationStage.GOAL_EXTRACTED:
-            prompt = f"""
-            目標: {extracted_goal}
-            
-            ユーザーの現状を踏まえて、目標達成のための具体的な実行プランを提案してください。
-            以下の点を含めてアドバイスしてください：
-            - 目標達成のための主要なステップ
-            - 必要なリソースや準備
-            - 予想される課題と対処方法
-            
-            ユーザーの入力: {request.message}
-            """
+        elif request.stage == ConversationStage.GOAL_EXTRACTED:
             response = client.models.generate_content(
                 model='gemini-2.0-flash',
-                contents=prompt
+                contents=f"""
+目標: {extracted_goal}
+ユーザーの入力: {request.message}
+
+目標達成のための具体的な実行プランを分析してください。
+""",
+                config={
+                    'response_mime_type': 'application/json',
+                    'response_schema': PlanningAdvice,
+                }
             )
+            result: PlanningAdvice = response.parsed
+            
+            response_text = f"""実行プラン:
+
+主要なステップ:
+{chr(10).join(f"- {s}" for s in result.main_steps)}
+
+必要なリソース:
+{chr(10).join(f"- {s}" for s in result.required_resources)}
+
+予想される課題:
+{chr(10).join(f"- {s}" for s in result.potential_challenges)}
+
+対策:
+{chr(10).join(f"- {s}" for s in result.mitigation_strategies)}
+
+このプランについて、ご意見やさらに詳しく知りたい点はありますか？
+"""
             next_stage = ConversationStage.PLANNING
 
-        elif stage == ConversationStage.PLANNING:
-            prompt = f"""
-            目標: {extracted_goal}
-            今日の日付: {current_date.strftime('%Y年%m月%d日')}
-            
-            この目標をどれくらいの期間で達成したいか、具体的な期間を確認してください。
-            ユーザーの回答から期間が明確でない場合は、以下のように質問してください：
-            「具体的な目標期間を教えていただけますか？（例：3ヶ月、半年、1年など）」
-            
-            ユーザーの入力: {request.message}
-            """
+        elif request.stage == ConversationStage.PLANNING:
             response = client.models.generate_content(
                 model='gemini-2.0-flash',
-                contents=prompt
+                contents=f"""
+                目標: {extracted_goal}
+                ユーザーの入力: {request.message}
+                
+                ユーザーの回答から目標達成に必要な期間を分析し、主要なマイルストーンを提案してください。
+                """,
+                config={
+                    'response_mime_type': 'application/json',
+                    'response_schema': PeriodAnalysis,
+                }
             )
+            result: PeriodAnalysis = response.parsed
             
-            # Geminiを使用した期間抽出
-            period_months = await extract_period_with_gemini(request.message, client)
-            if period_months:
-                target_date = (current_date + timedelta(days=30.44 * period_months)).strftime('%Y-%m-%d')
+            if result.confidence >= 0.6:
+                target_date = (current_date + timedelta(days=30.44 * result.period_months)).strftime('%Y-%m-%d')
+                response_text = f"""
+                目標達成までの期間を{result.period_months}ヶ月と設定しました。
+
+                判断理由:
+                {result.reasoning}
+
+                主要なマイルストーン:
+                {chr(10).join(f"- {m}" for m in result.milestones)}
+
+                この期間設定で具体的なスケジュールを作成していきましょう。
+                """
                 next_stage = ConversationStage.SCHEDULING
             else:
+                response_text = "目標達成までの具体的な期間を教えていただけますか？（例：3ヶ月、半年、1年など）"
                 next_stage = ConversationStage.PLANNING
 
-        elif stage == ConversationStage.SCHEDULING:
-            if not target_date:
-                target_date = (current_date + timedelta(days=365)).strftime('%Y-%m-%d')
-            
-            prompt = f"""
-            目標: {extracted_goal}
-            期間: {current_date.strftime('%Y年%m月%d日')} から {datetime.strptime(target_date, '%Y-%m-%d').strftime('%Y年%m月%d日')} まで
-            
-            具体的なスケジュールと実行計画を作成します。
-            以下の要素を必ず含めて、箇条書きで明確に回答してください：
-
-            1. 全体スケジュール
-            - 主要なマイルストーンと期限
-            - 月単位の達成目標
-            
-            2. 詳細なタスク
-            - 週単位でのタスク一覧
-            - 各タスクの所要時間の目安
-            
-            3. 進捗管理方法
-            - 定期的な振り返りのタイミング
-            - 進捗測定の具体的な方法
-            
-            回答の最後に「このスケジュールをカレンダーに登録しますか？」と付け加えてください。
-            
-            ユーザーの入力: {request.message}
-            """
+        elif request.stage == ConversationStage.SCHEDULING:
+            current_date = datetime.now()
             response = client.models.generate_content(
                 model='gemini-2.0-flash',
-                contents=prompt
+                contents=f"""
+                目標: {extracted_goal}
+                期間: {current_date.strftime('%Y-%m-%d')} から {target_date} まで
+                ユーザーの入力: {request.message}
+                
+                詳細なスケジュールと実行計画を作成してください。
+                """,
+                config={
+                    'response_mime_type': 'application/json',
+                    'response_schema': SchedulePlan,
+                }
             )
+            result: SchedulePlan = response.parsed
+            
+            response_text = f"""スケジュール案を作成しました。
+
+主要なマイルストーン:
+{chr(10).join(f"- {m['title']}: {m['deadline']}" for m in result.milestones)}
+
+月別の目標:
+{chr(10).join(f"- {g['month']}: {g['goals']}" for g in result.monthly_goals)}
+
+週別のタスク:
+{chr(10).join(f"【{w['week']}】\n" + chr(10).join(f"- {t}" for t in w['tasks']) for w in result.weekly_tasks)}
+
+タスクの所要時間目安:
+{chr(10).join(f"- {task}: {time}" for task, time in result.time_estimates.items())}
+
+進捗確認のポイント:
+{chr(10).join(f"- {r['timing']}: {r['focus']}" for r in result.review_points)}
+
+このスケジュールをカレンダーに登録しますか？
+"""
             next_stage = ConversationStage.CONFIRM_SCHEDULE
 
-        elif stage == ConversationStage.CONFIRM_SCHEDULE:
-            prompt = f"""
-            ユーザーがスケジュールのカレンダー登録について返答しました。
+        elif request.stage == ConversationStage.CONFIRM_SCHEDULE:
+            # ユーザーの承認を解析
+            is_approved = await analyze_user_approval(request.message, client)
             
-            もしユーザーが登録を希望する場合:
-            「カレンダー連携の準備が整いました。続けてもよろしいですか？」と返答してください。
-            
-            もしユーザーが登録を希望しない場合:
-            「承知しました。他に質問や確認したいことはありますか？」と返答してください。
-            
-            ユーザーの入力: {request.message}
-            """
-            response = client.models.generate_content(
-                model='gemini-2.0-flash',
-                contents=prompt
-            )
+            if is_approved:
+                # カレンダーイベントを生成
+                calendar_schedule = await generate_calendar_events(
+                    extracted_goal,
+                    target_date,
+                    client
+                )
+                
+                # レスポンスにカレンダーデータを含める
+                response_text = f"""
+                カレンダーのイベントを生成しました。以下の内容で登録を進めます：
+
+                {len(calendar_schedule.events)}件のイベントを作成
+                期間: {calendar_schedule.events[0].start_date} から {calendar_schedule.events[-1].end_date}
+
+                カレンダー連携の準備が整いました。続けてもよろしいですか？
+                """
+                # カレンダーデータをログに記録（デバッグ用）
+                logger.info(f"Generated calendar events: {calendar_schedule.json()}")
+            else:
+                response_text = "承知しました。他に質問や確認したいことはありますか？"
+
+            response = genai.types.Content(text=response_text)
 
         return ChatResponse(
-            response=response.text,
-            stage=next_stage,
-            extractedGoal=extracted_goal,
-            targetDate=target_date
+            response=response_text if 'response_text' in locals() else response.text,
+            stage=transition.next_stage if transition.can_proceed else request.stage,
+            extractedGoal=context.extracted_goal,
+            targetDate=context.target_date
         )
     
     except Exception as e:
         logger.error(f"Error processing chat request: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.on_event("startup")
+async def startup_event():
+    """アプリケーション起動時の初期化処理"""
+    logger.info("Application starting up")
+    try:
+        # 環境変数の読み込みと検証
+        env_values = load_environment_variables()
+        logger.info("Environment variables loaded successfully")
+        
+        # Gemini APIの初期化
+        global client
+        client = genai.Client(api_key=env_values["GEMINI_API_KEY"])
+        logger.info("Gemini API client initialized successfully")
+        
+    except Exception as e:
+        logger.error(f"Startup failed: {e}")
+        raise
+
 @app.get("/health")
 async def health_check():
-    """ヘルスチェックエンドポイント"""
-    return {"status": "healthy"}
+    """詳細なヘルスチェックエンドポイント"""
+    try:
+        # Gemini APIの接続テスト
+        response = client.models.list()
+        return {
+            "status": "healthy",
+            "timestamp": datetime.now().isoformat(),
+            "environment": "Cloud Run" if os.getenv("K_SERVICE") else "Local",
+            "api_status": "connected"
+        }
+    except Exception as e:
+        logger.error(f"Health check failed: {e}")
+        raise HTTPException(
+            status_code=503,
+            detail=f"Service unhealthy: {str(e)}"
+        )
 
 if __name__ == "__main__":
     import uvicorn
